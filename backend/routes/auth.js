@@ -6,9 +6,46 @@ const { getConnection } = require("../db");
 
 const router = express.Router();
 
-// ==========================================
-// REGISTER
-// ==========================================
+/* =========================================================
+   HELPER
+   Handles Oracle column names regardless of case
+   ========================================================= */
+
+function getColumn(row, columnName) {
+  if (!row) return undefined;
+
+  const target = columnName.toLowerCase();
+
+  const key = Object.keys(row).find(
+    (key) => key.toLowerCase() === target
+  );
+
+  return key ? row[key] : undefined;
+}
+
+
+/* =========================================================
+   CREATE JWT
+   ========================================================= */
+
+function createToken(user) {
+  return jwt.sign(
+    {
+      user_id: user.user_id,
+      email: user.email,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "7d",
+    }
+  );
+}
+
+
+/* =========================================================
+   REGISTER
+   ========================================================= */
+
 router.post("/register", async (req, res) => {
   let connection;
 
@@ -18,10 +55,6 @@ router.post("/register", async (req, res) => {
       last_name,
       email,
       password,
-      middle_name,
-      phone_no,
-      gender,
-      dob,
     } = req.body;
 
     if (!first_name || !last_name || !email || !password) {
@@ -31,66 +64,73 @@ router.post("/register", async (req, res) => {
       });
     }
 
+    const cleanFirstName = String(first_name).trim();
+    const cleanLastName = String(last_name).trim();
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPassword = String(password);
+
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({
+        error: "Password must be at least 6 characters",
+      });
+    }
+
     connection = await getConnection();
 
-    const cleanEmail = email.trim().toLowerCase();
+    /* Check existing account */
 
-    // Check if email already exists
-    const existingUser = await connection.execute(
+    const existing = await connection.execute(
       `
       SELECT user_id
       FROM app_user
-      WHERE LOWER(email) = :email
+      WHERE LOWER(TRIM(email)) = :email
       `,
       {
         email: cleanEmail,
       }
     );
 
-    if (existingUser.rows.length > 0) {
+    if (existing.rows.length > 0) {
       return res.status(409).json({
-        error: "Email already registered",
+        error:
+          "An account with this email already exists",
       });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    /* Hash password */
 
-    // Insert user
+    const hashedPassword = await bcrypt.hash(
+      cleanPassword,
+      10
+    );
+
+    console.log(
+      "CREATING USER:",
+      cleanEmail
+    );
+
+    /* Insert user */
+
     const result = await connection.execute(
       `
       INSERT INTO app_user (
         first_name,
-        middle_name,
         last_name,
         email,
-        phone_no,
-        gender,
-        dob,
         password
       )
       VALUES (
         :first_name,
-        :middle_name,
         :last_name,
         :email,
-        :phone_no,
-        :gender,
-        :dob,
         :password
       )
       RETURNING user_id INTO :user_id
       `,
       {
-        first_name: first_name.trim(),
-        middle_name: middle_name
-          ? middle_name.trim()
-          : null,
-        last_name: last_name.trim(),
+        first_name: cleanFirstName,
+        last_name: cleanLastName,
         email: cleanEmail,
-        phone_no: phone_no || null,
-        gender: gender || null,
-        dob: dob ? new Date(dob) : null,
         password: hashedPassword,
 
         user_id: {
@@ -105,35 +145,101 @@ router.post("/register", async (req, res) => {
 
     const userId = result.outBinds.user_id[0];
 
-    const token = jwt.sign(
+    console.log(
+      "NEW USER ID:",
+      userId
+    );
+
+    /* Verify inserted user */
+
+    const verifyResult = await connection.execute(
+      `
+      SELECT
+        user_id,
+        first_name,
+        last_name,
+        email,
+        password
+      FROM app_user
+      WHERE user_id = :user_id
+      `,
       {
         user_id: userId,
-        email: cleanEmail,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "7d",
       }
     );
 
-    res.status(201).json({
+    if (verifyResult.rows.length === 0) {
+      console.error(
+        "USER WAS NOT FOUND AFTER INSERT:",
+        userId
+      );
+
+      return res.status(500).json({
+        error:
+          "Account was created but could not be verified",
+      });
+    }
+
+    const row = verifyResult.rows[0];
+
+    /* Read Oracle values safely */
+
+    const user = {
+      user_id: getColumn(row, "user_id"),
+      first_name: getColumn(row, "first_name"),
+      last_name: getColumn(row, "last_name"),
+      email: getColumn(row, "email"),
+      password: getColumn(row, "password"),
+    };
+
+    console.log(
+      "REGISTER VERIFICATION:",
+      {
+        user_id: user.user_id,
+        email: user.email,
+        passwordExists: !!user.password,
+      }
+    );
+
+    if (!user.password) {
+      console.error(
+        "PASSWORD WAS NOT STORED FOR USER:",
+        user.user_id
+      );
+
+      return res.status(500).json({
+        error:
+          "Account was created but password was not stored",
+      });
+    }
+
+    const token = createToken(user);
+
+    return res.status(201).json({
       message: "Registration successful",
+
       token,
 
       user: {
-        user_id: userId,
-        first_name: first_name.trim(),
-        last_name: last_name.trim(),
-        email: cleanEmail,
+        user_id: user.user_id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        email: user.email,
       },
     });
-  } catch (error) {
-    console.error("REGISTER ERROR:", error);
 
-    res.status(500).json({
+  } catch (error) {
+    console.error(
+      "REGISTER ERROR:",
+      error
+    );
+
+    return res.status(500).json({
       error: "Registration failed",
       details: error.message,
+      oracleCode: error.errorNum || null,
     });
+
   } finally {
     if (connection) {
       await connection.close();
@@ -141,29 +247,40 @@ router.post("/register", async (req, res) => {
   }
 });
 
-// ==========================================
-// LOGIN
-// ==========================================
+
+/* =========================================================
+   LOGIN
+   ========================================================= */
+
 router.post("/login", async (req, res) => {
   let connection;
 
   try {
-    const { email, password } = req.body;
-
-    console.log("LOGIN REQUEST:", {
+    const {
       email,
-      passwordProvided: !!password,
-    });
+      password,
+    } = req.body;
+
+    console.log(
+      "LOGIN REQUEST:",
+      {
+        email,
+        passwordProvided: !!password,
+      }
+    );
 
     if (!email || !password) {
       return res.status(400).json({
-        error: "Email and password are required",
+        error:
+          "Email and password are required",
       });
     }
 
-    connection = await getConnection();
+    const cleanEmail = String(email)
+      .trim()
+      .toLowerCase();
 
-    const cleanEmail = email.trim().toLowerCase();
+    connection = await getConnection();
 
     const result = await connection.execute(
       `
@@ -174,7 +291,7 @@ router.post("/login", async (req, res) => {
         email,
         password
       FROM app_user
-      WHERE LOWER(email) = :email
+      WHERE LOWER(TRIM(email)) = :email
       `,
       {
         email: cleanEmail,
@@ -182,81 +299,115 @@ router.post("/login", async (req, res) => {
     );
 
     console.log(
-      "USER FOUND:",
+      "ROWS FOUND:",
       result.rows.length
     );
 
     if (result.rows.length === 0) {
+      console.log(
+        "USER NOT FOUND:",
+        cleanEmail
+      );
+
       return res.status(401).json({
-        error: "Invalid email or password",
+        error:
+          "Invalid email or password",
       });
     }
 
-    const user = result.rows[0];
+    const row = result.rows[0];
 
-    console.log("USER ID:", user.USER_ID);
+    /* Read Oracle result safely */
+
+    const user = {
+      user_id: getColumn(row, "user_id"),
+      first_name: getColumn(row, "first_name"),
+      last_name: getColumn(row, "last_name"),
+      email: getColumn(row, "email"),
+      password: getColumn(row, "password"),
+    };
+
     console.log(
-      "PASSWORD HASH EXISTS:",
-      !!user.PASSWORD
+      "USER FOUND:",
+      user.email
     );
 
-    if (!user.PASSWORD) {
+    console.log(
+      "USER ID:",
+      user.user_id
+    );
+
+    console.log(
+      "PASSWORD HASH EXISTS:",
+      !!user.password
+    );
+
+    if (!user.password) {
       return res.status(401).json({
         error:
           "This account does not have a password. Please register again.",
       });
     }
 
-    const passwordMatch = await bcrypt.compare(
-      String(password),
-      String(user.PASSWORD)
-    );
+    /* Compare password */
+
+    const passwordMatches =
+      await bcrypt.compare(
+        String(password),
+        user.password
+      );
 
     console.log(
       "PASSWORD MATCH:",
-      passwordMatch
+      passwordMatches
     );
 
-    if (!passwordMatch) {
+    if (!passwordMatches) {
       return res.status(401).json({
-        error: "Invalid email or password",
+        error:
+          "Invalid email or password",
       });
     }
 
-    const token = jwt.sign(
-      {
-        user_id: user.USER_ID,
-        email: user.EMAIL,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "7d",
-      }
+    /* Create JWT */
+
+    const token = createToken(user);
+
+    console.log(
+      "LOGIN SUCCESSFUL FOR USER:",
+      user.user_id
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Login successful",
+
       token,
 
       user: {
-        user_id: user.USER_ID,
-        first_name: user.FIRST_NAME,
-        last_name: user.LAST_NAME,
-        email: user.EMAIL,
+        user_id: user.user_id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        email: user.email,
       },
     });
-  } catch (error) {
-    console.error("LOGIN ERROR:", error);
 
-    res.status(500).json({
+  } catch (error) {
+    console.error(
+      "LOGIN ERROR:",
+      error
+    );
+
+    return res.status(500).json({
       error: "Login failed",
       details: error.message,
     });
+
   } finally {
     if (connection) {
       await connection.close();
     }
   }
 });
+
 
 module.exports = router;
