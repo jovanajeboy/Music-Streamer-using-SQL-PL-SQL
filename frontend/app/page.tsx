@@ -144,15 +144,13 @@ export default function Home() {
   setSubscriptionLoading(true);
 
   try {
-    const response = await fetch(
-      `${API_URL}/api/subscriptions/my`,
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${activeToken}`,
-        },
-      }
-    );
+    const response = await fetch(`${API_URL}/api/subscriptions/my`, {
+  method: "GET",
+  headers: {
+    Authorization: `Bearer ${activeToken}`,
+    "Content-Type": "application/json",
+  },
+});
 
     const data = await response.json();
 
