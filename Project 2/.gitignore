@@ -1,0 +1,34 @@
+﻿# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js build
+.next/
+out/
+build/
+dist/
+
+# Java build artifacts
+target/
+*.class
+*.jar
+!backend/lib/*.jar
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Database & runtime data
+cockroach-data/
+*.db
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.user
+*.tsbuildinfo
